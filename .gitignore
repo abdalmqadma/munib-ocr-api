@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+docling_result.json
+docling_result.md
+
+*.jpg
+*.jpeg
+*.png
+
+debug/
