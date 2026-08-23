@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import re
+import time
 
 import cv2
 import numpy as np
@@ -257,30 +258,55 @@ def validate_day(day):
 @app.post("/extract")
 async def extract_imsakia(file: UploadFile = File(...)):
     temp_path=None
+    request_started = time.perf_counter()
+    timings = {}
+    def mark(name, started):
+        elapsed = time.perf_counter() - started
+        timings[name] = round(elapsed, 3)
+        print(f"[PERF] {name}: {elapsed:.3f}s", flush=True)
+        return elapsed
     try:
+        step_started = time.perf_counter()
         contents=await file.read()
+        mark("read_upload", step_started)
         if not contents:
             raise HTTPException(status_code=400,detail="Empty file")
         suffix=Path(file.filename or "imsakia.jpg").suffix or ".jpg"
+        step_started = time.perf_counter()
         with tempfile.NamedTemporaryFile(delete=False,suffix=suffix) as tmp:
             tmp.write(contents); temp_path=Path(tmp.name)
+        mark("write_temp", step_started)
+
+        step_started = time.perf_counter()
         image=cv2.imread(str(temp_path))
+        mark("decode_image", step_started)
         if image is None:
             raise HTTPException(status_code=400,detail="Could not read image")
 
         # Cap image size to reduce peak RAM.
+        step_started = time.perf_counter()
         if image.shape[1] > 2200:
             scale=2200/image.shape[1]
             image=cv2.resize(image,None,fx=scale,fy=scale,interpolation=cv2.INTER_AREA)
+        mark("resize_image", step_started)
 
+        step_started = time.perf_counter()
         hlines,vlines=detect_lines(image)
+        mark("detect_grid_lines", step_started)
+        step_started = time.perf_counter()
         vgrid=best_8_vertical(vlines,image.shape[1])
         hgrid=densest_horizontal_run(hlines)
+        mark("select_grid", step_started)
         if vgrid is None or len(hgrid)<20:
             raise HTTPException(status_code=422,detail="Could not detect timetable grid")
 
+        step_started = time.perf_counter()
         raw_rows=extract_grid_rows(image,hgrid,vgrid)
+        mark("rapidocr_and_cell_assignment", step_started)
+
+        step_started = time.perf_counter()
         days=repair_missing_cells(normalize_rows(raw_rows))
+        mark("normalize_and_repair", step_started)
         rows_from_ocr=len(days)
         physical_row_count=len(build_data_bands(hgrid))
 
@@ -307,6 +333,9 @@ async def extract_imsakia(file: UploadFile = File(...)):
                 })
 
         requires_user_review=bool(review_rows)
+        total_elapsed = time.perf_counter() - request_started
+        timings["total"] = round(total_elapsed, 3)
+        print(f"[PERF] TOTAL: {total_elapsed:.3f}s | {timings}", flush=True)
         return {
             "success":True,
             "docling_grid_rows":len(hgrid),
@@ -329,6 +358,8 @@ async def extract_imsakia(file: UploadFile = File(...)):
             ),
             "review_rows":review_rows,
             "ocr_backend":"rapidocr-onnxruntime",
+            "processing_ms": int(total_elapsed * 1000),
+            "timings_seconds": timings,
             "days":days,
         }
     except HTTPException:
