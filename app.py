@@ -13,7 +13,7 @@ ocr_engine = RapidOCR()
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "munib-imsakia", "ocr_backend": "rapidocr-onnxruntime"}
+    return {"status": "ok", "service": "munib-imsakia", "ocr_backend": "rapidocr-onnxruntime", "ocr_mode": "grid-batched-recognition-only"}
 
 def clean_cell(value):
     if value is None:
@@ -145,29 +145,149 @@ def build_data_bands(lines):
     return [{"top":lines[i],"bottom":lines[i+1],"height":lines[i+1]-lines[i]}
             for i in range(len(lines)-1) if 18 <= lines[i+1]-lines[i] <= 70]
 
+def prepare_cell_for_recognition(cell):
+    """
+    Prepare one already-segmented timetable cell for recognition only.
+
+    The grid gives us the text location already, so running RapidOCR's detector
+    again is wasted CPU. We crop a few pixels away from the borders and let only
+    the recognition model read the time.
+    """
+    if cell is None or cell.size == 0:
+        return None
+
+    h, w = cell.shape[:2]
+    inset_x = max(2, int(w * 0.03))
+    inset_y = max(2, int(h * 0.08))
+
+    if w > inset_x * 2 + 4 and h > inset_y * 2 + 4:
+        cell = cell[inset_y:h-inset_y, inset_x:w-inset_x]
+
+    # A modest, fixed text height is enough for the recognizer and avoids
+    # feeding unnecessarily large images to ONNX Runtime.
+    target_h = 40
+    ch, cw = cell.shape[:2]
+    if ch > 0 and ch != target_h:
+        scale = target_h / ch
+        new_w = max(24, min(220, int(round(cw * scale))))
+        interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+        cell = cv2.resize(cell, (new_w, target_h), interpolation=interpolation)
+
+    # White padding keeps digits away from the edge and improves recognition
+    # of leading/trailing digits such as 03:48.
+    cell = cv2.copyMakeBorder(
+        cell, 4, 4, 6, 6,
+        cv2.BORDER_CONSTANT,
+        value=(255, 255, 255),
+    )
+    return cell
+
+
+def recognize_cells_batch(cell_images, batch_size=64):
+    """
+    Recognition-only OCR.
+
+    RapidOCR's normal call performs DET -> CLS -> REC. Because our OpenCV grid
+    already segmented every cell, we bypass DET and CLS completely and send
+    the cropped cells directly to the recognition model in batches.
+    """
+    texts = []
+
+    for start in range(0, len(cell_images), batch_size):
+        batch = cell_images[start:start + batch_size]
+        if not batch:
+            continue
+
+        rec_res = ocr_engine.recognize_txt(batch)
+        batch_texts = getattr(rec_res, "txts", None)
+
+        if batch_texts is None:
+            texts.extend([""] * len(batch))
+            continue
+
+        batch_texts = list(batch_texts)
+        if len(batch_texts) < len(batch):
+            batch_texts.extend([""] * (len(batch) - len(batch_texts)))
+
+        texts.extend(clean_cell(t) for t in batch_texts[:len(batch)])
+
+    return texts
+
+
 def extract_grid_rows(image, hlines, vlines):
-    crop = image[max(0,hlines[0]-4):min(image.shape[0],hlines[-1]+4),
-                 max(0,vlines[0]-4):min(image.shape[1],vlines[-1]+4)]
-    xoff, yoff = max(0,vlines[0]-4), max(0,hlines[0]-4)
-    tokens = run_ocr(crop)
-    for t in tokens:
-        t["cx"] += xoff
-        t["cy"] += yoff
+    """
+    Extract the 7 prayer-time columns using the already detected grid.
+
+    Old version:
+      one huge table crop -> full RapidOCR detector/classifier/recognizer
+      (~286 seconds on Render Free in the measured request)
+
+    New version:
+      grid cells -> recognition model only, batched
+    """
+    candidate_rows = []
+    cell_images = []
+    cell_slots = []
+
+    for ri in range(len(hlines) - 1):
+        y1, y2 = hlines[ri], hlines[ri + 1]
+        if not (18 <= y2 - y1 <= 70):
+            continue
+
+        candidate_rows.append(ri)
+
+        for ci in range(7):
+            x1, x2 = vlines[ci], vlines[ci + 1]
+
+            # Crop inside the detected borders so the recognizer never sees
+            # the table lines themselves.
+            pad_x = max(1, int((x2 - x1) * 0.02))
+            pad_y = max(1, int((y2 - y1) * 0.05))
+
+            xa = max(0, x1 + pad_x)
+            xb = min(image.shape[1], x2 - pad_x)
+            ya = max(0, y1 + pad_y)
+            yb = min(image.shape[0], y2 - pad_y)
+
+            crop = image[ya:yb, xa:xb]
+            prepared = prepare_cell_for_recognition(crop)
+
+            if prepared is None:
+                # Keep positional alignment with the 7-column grid.
+                prepared = np.full((48, 48, 3), 255, dtype=np.uint8)
+
+            cell_slots.append((ri, ci))
+            cell_images.append(prepared)
+
+    if not cell_images:
+        return []
+
+    recognized = recognize_cells_batch(cell_images)
+
+    row_map = {
+        ri: [""] * 7
+        for ri in candidate_rows
+    }
+
+    for (ri, ci), text in zip(cell_slots, recognized):
+        row_map[ri][ci] = clean_cell(text)
 
     rows = []
-    for ri in range(len(hlines)-1):
-        y1,y2 = hlines[ri], hlines[ri+1]
-        if not (18 <= y2-y1 <= 70):
-            continue
-        cells = []
-        for ci in range(7):
-            x1,x2 = vlines[ci],vlines[ci+1]
-            cell = [t for t in tokens if x1 <= t["cx"] <= x2 and y1 <= t["cy"] <= y2]
-            cell.sort(key=lambda t:t["cx"])
-            cells.append(clean_cell("".join(t["text"] for t in cell)))
-        time_count = sum(bool(re.search(r"\d{1,2}:\d{2}|:\d{2}", c)) for c in cells)
+    for ri in candidate_rows:
+        cells = row_map[ri]
+        time_count = sum(
+            bool(re.search(r"\d{1,2}:\d{2}|:\d{2}", value))
+            for value in cells
+        )
+
+        # Same conservative filter as before: only rows containing at least
+        # three time-looking cells are treated as prayer timetable rows.
         if time_count >= 3:
-            rows.append({"grid_index":ri,"cells":cells})
+            rows.append({
+                "grid_index": ri,
+                "cells": cells,
+            })
+
     return rows
 
 def normalize_rows(rows):
@@ -302,7 +422,7 @@ async def extract_imsakia(file: UploadFile = File(...)):
 
         step_started = time.perf_counter()
         raw_rows=extract_grid_rows(image,hgrid,vgrid)
-        mark("rapidocr_and_cell_assignment", step_started)
+        mark("rapidocr_recognition_only", step_started)
 
         step_started = time.perf_counter()
         days=repair_missing_cells(normalize_rows(raw_rows))
