@@ -3,6 +3,5 @@ uvicorn[standard]
 python-multipart
 opencv-python-headless
 numpy
-rapidocr==3.9.2
-onnxruntime>=1.18,<2
+pytesseract>=0.3.13,<0.4
 firebase-admin>=6.5,<8
