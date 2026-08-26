@@ -10,6 +10,7 @@ ENV RATE_LIMIT_REQUESTS=6
 ENV RATE_LIMIT_WINDOW_SECONDS=60
 
 RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
     libxcb1 \
     libx11-6 \
     libxext6 \
@@ -20,8 +21,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
 COPY secure_app.py .
+COPY fast_ocr.py .
 
 EXPOSE 8000
 
