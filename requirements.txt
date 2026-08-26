@@ -5,3 +5,4 @@ opencv-python-headless
 numpy
 rapidocr==3.9.2
 onnxruntime>=1.18,<2
+firebase-admin>=6.5,<8
