@@ -6,10 +6,10 @@ import threading
 import time
 from collections import defaultdict, deque
 
-from fastapi import Depends, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from firebase_admin import auth, credentials, get_app, initialize_app
 
-import app as legacy
+import fast_ocr
 
 logger = logging.getLogger("munib_ocr.security")
 
@@ -39,18 +39,20 @@ def _init_firebase():
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             raise RuntimeError("Invalid Firebase service account configuration") from exc
     else:
-        # Production can use GOOGLE_APPLICATION_CREDENTIALS / ADC instead.
         initialize_app()
 
 
 _init_firebase()
-app = legacy.app
+app = FastAPI(title="Munib Imsakia API")
 
-# Replace the legacy public /extract route with the authenticated wrapper below.
-app.router.routes[:] = [
-    route for route in app.router.routes
-    if not (getattr(route, "path", None) == "/extract" and "POST" in getattr(route, "methods", set()))
-]
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "service": "munib-imsakia",
+        "ocr_backend": "tesseract-grid-viterbi",
+    }
 
 
 def _bearer_token(authorization):
@@ -101,10 +103,8 @@ def _valid_image(contents, content_type):
     return contents.startswith(JPEG_MAGIC) or contents.startswith(PNG_MAGIC)
 
 
-def _run_legacy_extract(file):
-    # Run the existing CPU-bound async handler in its own worker thread so the
-    # API event loop stays responsive and the outer request can enforce a deadline.
-    return asyncio.run(legacy.extract_imsakia(file))
+def _run_fast_extract(file):
+    return asyncio.run(fast_ocr.extract_imsakia(file))
 
 
 @app.post("/extract")
@@ -134,7 +134,7 @@ async def secure_extract(
     await file.seek(0)
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_run_legacy_extract, file),
+            asyncio.to_thread(_run_fast_extract, file),
             timeout=OCR_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
