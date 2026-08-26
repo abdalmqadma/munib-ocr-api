@@ -4,6 +4,10 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV MAX_UPLOAD_BYTES=4194304
+ENV OCR_TIMEOUT_SECONDS=20
+ENV RATE_LIMIT_REQUESTS=6
+ENV RATE_LIMIT_WINDOW_SECONDS=60
 
 RUN apt-get update && apt-get install -y \
     libxcb1 \
@@ -14,11 +18,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY secure_app.py .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "secure_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "10"]
