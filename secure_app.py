@@ -6,6 +6,7 @@ import threading
 import time
 from collections import defaultdict, deque
 
+from cloudinary.utils import api_sign_request
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from firebase_admin import auth, credentials, get_app, initialize_app
 
@@ -17,6 +18,12 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(4 * 1024 * 1024)))
 OCR_TIMEOUT_SECONDS = float(os.getenv("OCR_TIMEOUT_SECONDS", "20"))
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "6"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
+CLOUDINARY_PROFILE_PRESET = os.getenv(
+    "CLOUDINARY_PROFILE_PRESET", "munib_profile"
+)
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "application/octet-stream"}
 JPEG_MAGIC = b"\xff\xd8\xff"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -76,6 +83,40 @@ async def verify_firebase_user(authorization: str | None = Header(default=None))
     if not decoded.get("uid"):
         raise HTTPException(status_code=401, detail="Invalid authentication token")
     return decoded
+
+
+@app.post("/profile-photo/signature")
+async def create_profile_photo_signature(
+    firebase_user=Depends(verify_firebase_user),
+):
+    """Create a short-lived, account-bound signature for one profile upload."""
+    if not all((CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)):
+        logger.error("Cloudinary profile upload is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="Profile photo upload is unavailable",
+        )
+
+    timestamp = int(time.time())
+    public_id = f"munib/profile_images/{firebase_user['uid']}"
+    params_to_sign = {
+        "invalidate": True,
+        "overwrite": True,
+        "public_id": public_id,
+        "timestamp": timestamp,
+        "upload_preset": CLOUDINARY_PROFILE_PRESET,
+    }
+    signature = api_sign_request(params_to_sign, CLOUDINARY_API_SECRET)
+    return {
+        "cloud_name": CLOUDINARY_CLOUD_NAME,
+        "api_key": CLOUDINARY_API_KEY,
+        "upload_preset": CLOUDINARY_PROFILE_PRESET,
+        "public_id": public_id,
+        "timestamp": timestamp,
+        "signature": signature,
+        "overwrite": True,
+        "invalidate": True,
+    }
 
 
 def _enforce_rate_limit(uid, request):
