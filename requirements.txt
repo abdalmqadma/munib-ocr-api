@@ -5,3 +5,4 @@ opencv-python-headless
 numpy
 pytesseract>=0.3.13,<0.4
 firebase-admin>=6.5,<8
+cloudinary>=1.41,<2
